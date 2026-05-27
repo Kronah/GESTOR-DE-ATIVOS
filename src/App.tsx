@@ -5,6 +5,7 @@ import { jsPDF } from 'jspdf'
 import { autoTable } from 'jspdf-autotable'
 import * as XLSX from 'xlsx'
 
+
 type DeviceRecord = {
   id: number
   companyName: string
@@ -317,8 +318,22 @@ function App() {
 
     const startScanner = async () => {
       try {
-        const { Html5Qrcode } = await import('html5-qrcode')
-        const scanner = new Html5Qrcode('barcode-reader')
+        const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode')
+        const scanner = new Html5Qrcode('barcode-reader', {
+          verbose: false,
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.QR_CODE,
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.DATA_MATRIX,
+            Html5QrcodeSupportedFormats.AZTEC,
+            Html5QrcodeSupportedFormats.PDF_417,
+          ],
+        })
         scannerCleanup = async () => {
           if (scanner.isScanning) {
             await scanner.stop()
@@ -336,7 +351,7 @@ function App() {
               return
             }
             lastValidationKeyRef.current = ''
-                        setScannerError(null)
+            setScannerError(null)
             setQrInput(decodedText)
           },
           () => {
@@ -496,9 +511,22 @@ function App() {
 
     const setupCameras = async () => {
       try {
-        const { Html5Qrcode } = await import('html5-qrcode')
+        const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode')
         const cameras = await Html5Qrcode.getCameras()
         if (!mounted) return
+
+        const scanFormats = [
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.UPC_A,
+          Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.DATA_MATRIX,
+          Html5QrcodeSupportedFormats.AZTEC,
+          Html5QrcodeSupportedFormats.PDF_417,
+        ]
 
         // Prefer rear/back cameras (front camera often comes first on mobile)
         const sorted = [...cameras].sort((a, b) => {
@@ -532,7 +560,7 @@ function App() {
           if (index > 0) await new Promise(r => setTimeout(r, 500))
 
           try {
-            const scanner = new Html5Qrcode('painel-reader-' + index)
+            const scanner = new Html5Qrcode('painel-reader-' + index, { verbose: false, formatsToSupport: scanFormats })
             painelScannerInstances.current[index] = scanner
 
             await scanner.start(
@@ -550,7 +578,7 @@ function App() {
             const rear = /back|rear|environment|traseira|ambient/i
             if (rear.test(cam.label)) {
               try {
-                const scanner = new Html5Qrcode('painel-reader-' + index)
+                const scanner = new Html5Qrcode('painel-reader-' + index, { verbose: false, formatsToSupport: scanFormats })
                 painelScannerInstances.current[index] = scanner
                 await scanner.start(
                   { facingMode: 'environment' },
