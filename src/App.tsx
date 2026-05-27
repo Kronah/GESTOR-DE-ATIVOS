@@ -500,11 +500,18 @@ function App() {
         const cameras = await Html5Qrcode.getCameras()
         if (!mounted) return
 
+        // Prefer rear/back cameras (front camera often comes first on mobile)
+        const sorted = [...cameras].sort((a, b) => {
+          const rear = /back|rear|environment|traseira|ambient/i
+          const aIsRear = rear.test(a.label) ? 0 : 1
+          const bIsRear = rear.test(b.label) ? 0 : 1
+          return aIsRear - bIsRear
+        })
 
         const assigned: ({id: string; label: string} | null)[] = [
-          cameras[0] ?? null,
-          cameras[1] ?? null,
-          cameras[2] ?? null,
+          sorted[0] ?? null,
+          sorted[1] ?? null,
+          sorted[2] ?? null,
         ]
         setPainelCameras(assigned)
 
@@ -521,6 +528,9 @@ function App() {
             continue
           }
 
+          // Small delay between starts to avoid browser stream limits
+          if (index > 0) await new Promise(r => setTimeout(r, 500))
+
           try {
             const scanner = new Html5Qrcode('painel-reader-' + index)
             painelScannerInstances.current[index] = scanner
@@ -536,6 +546,26 @@ function App() {
             )
           } catch {
             if (!mounted) return
+            // If exact deviceId fails, try facingMode fallback for rear cameras
+            const rear = /back|rear|environment|traseira|ambient/i
+            if (rear.test(cam.label)) {
+              try {
+                const scanner = new Html5Qrcode('painel-reader-' + index)
+                painelScannerInstances.current[index] = scanner
+                await scanner.start(
+                  { facingMode: 'environment' },
+                  { fps: 18 },
+                  async (decodedText) => {
+                    if (!mounted) return
+                    await validatePainel(index, decodedText)
+                  },
+                  () => {},
+                )
+                continue // success with fallback, skip to next index
+              } catch {
+                // fallback also failed, show error below
+              }
+            }
             setPainelErrors(prev => {
               const next = [...prev]
               next[index] = 'Falha ao iniciar camera ' + (index + 1)
