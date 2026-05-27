@@ -247,11 +247,17 @@ function App() {
   const [qrInput, setQrInput] = useState('')
     const [validationLoading, setValidationLoading] = useState(false)
     const [validationResult, setValidationResult] = useState<LiveValidation | null>(null)
-  const [validationHistory, setValidationHistory] = useState<LiveValidation[]>([])
   const [scannerOpen, setScannerOpen] = useState(false)
   const [scannerError, setScannerError] = useState<string | null>(null)
+  const [painelCameras, setPainelCameras] = useState<({id: string; label: string} | null)[]>([null, null, null])
+  const [painelResults, setPainelResults] = useState<(LiveValidation | null)[]>([null, null, null])
+  const [painelErrors, setPainelErrors] = useState<(string | null)[]>([null, null, null])
+  const [painelScanning, setPainelScanning] = useState(false)
+  const PAINEL_COUNT = 3
   const scannerRef = useRef<HTMLDivElement | null>(null)
   const lastValidationKeyRef = useRef('')
+  const painelScannerRefs = useRef<(HTMLDivElement | null)[]>([null, null, null])
+  const painelScannerInstances = useRef<any[]>([null, null, null])
 
   const configuredAccessUser = (import.meta.env.VITE_ACCESS_USER as string | undefined)?.trim() || 'admin'
   const configuredAccessPassword =
@@ -295,25 +301,6 @@ function App() {
       window.localStorage.removeItem(AUTH_STORAGE_KEY)
     }
   }
-
-  useEffect(() => {
-    if (validationResult) {
-      setValidationHistory((prev) => {
-        const exists = prev.findIndex((item) => item.device.id === validationResult.device.id && item.validatedAt === validationResult.validatedAt)
-        if (exists !== -1) {
-          return prev
-        }
-        return [validationResult, ...prev].slice(0, 20)
-      })
-    }
-  }, [validationResult])
-
-  const cardBorderClass = useMemo(() => {
-    if (!validationResult) {
-      return 'status-neutral'
-    }
-    return getStatusMeta(validationResult.device.status).cardClass
-  }, [validationResult])
 
   const lockedView = forcedView
   const isUnifiedMode = !lockedView
@@ -383,6 +370,205 @@ function App() {
       setScannerOpen(true)
     }
   }, [canUseEmbeddedCamera, view])
+
+  const runValidation = useCallback(async (assetCode: string, photo: File | null) => {
+    setValidationLoading(true)
+
+    try {
+      const formData = new FormData()
+      formData.set('assetCode', assetCode)
+      if (photo) {
+        formData.set('assetPhoto', photo)
+      }
+
+      const response = await fetch(resolveApiUrl('/api/validate'), {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error?: string }
+        throw new Error(errorData.error ?? 'Falha na validacao')
+      }
+
+      const payload = (await response.json()) as ValidationResponse
+      setValidationResult({
+        validatedAt: new Date().toISOString(),
+        device: {
+          id: payload.device.id,
+          companyName: payload.device.companyName,
+          thirdPartyResponsible: payload.device.thirdPartyResponsible ?? null,
+          teamLeader: payload.device.teamLeader,
+          notebookResponsibleName: payload.device.notebookResponsibleName,
+          department: payload.device.department,
+          matriculaPlanta: payload.device.matriculaPlanta,
+          responsiblePhotoPath: payload.device.responsiblePhotoPath,
+          assetCode: payload.device.assetCode,
+          status: payload.device.status,
+          createdAt: payload.device.createdAt,
+          updatedAt: payload.device.updatedAt,
+        },
+        validationPhotoPath: payload.validationPhotoPath,
+      })
+    } catch (error) {
+      lastValidationKeyRef.current = ''
+    } finally {
+      setValidationLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (view !== 'camera' || !qrInput || validationLoading) {
+      return
+    }
+
+    const validationKey = qrInput;
+    if (lastValidationKeyRef.current === validationKey) return;
+    lastValidationKeyRef.current = validationKey;
+    void runValidation(qrInput, null);
+  }, [qrInput, runValidation, validationLoading, view])
+
+
+
+  const validatePainel = useCallback(async (index: number, assetCode: string) => {
+    try {
+      const formData = new FormData()
+      formData.set('assetCode', assetCode)
+
+      const response = await fetch(resolveApiUrl('/api/validate'), {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error?: string }
+        throw new Error(errorData.error ?? 'Falha na validacao')
+      }
+
+      const payload = (await response.json()) as ValidationResponse
+      const validation: LiveValidation = {
+        validatedAt: new Date().toISOString(),
+        device: {
+          id: payload.device.id,
+          companyName: payload.device.companyName,
+          thirdPartyResponsible: payload.device.thirdPartyResponsible ?? null,
+          teamLeader: payload.device.teamLeader,
+          notebookResponsibleName: payload.device.notebookResponsibleName,
+          department: payload.device.department,
+          matriculaPlanta: payload.device.matriculaPlanta,
+          responsiblePhotoPath: payload.device.responsiblePhotoPath,
+          assetCode: payload.device.assetCode,
+          status: payload.device.status,
+          createdAt: payload.device.createdAt,
+          updatedAt: payload.device.updatedAt,
+        },
+        validationPhotoPath: payload.validationPhotoPath,
+      }
+
+      setPainelResults(prev => {
+        const next = [...prev]
+        next[index] = validation
+        return next
+      })
+    } catch (error) {
+      setPainelErrors(prev => {
+        const next = [...prev]
+        next[index] = error instanceof Error ? error.message : 'Erro na validacao'
+        return next
+      })
+    }
+  }, [])
+
+
+
+
+  // --- 3-camera painel scanner ---
+  useEffect(() => {
+    if (view !== 'painel') {
+      return
+    }
+
+    setPainelResults([null, null, null])
+    setPainelErrors([null, null, null])
+    setPainelScanning(false)
+
+    let mounted = true
+
+    const setupCameras = async () => {
+      try {
+        const { Html5Qrcode } = await import('html5-qrcode')
+        const cameras = await Html5Qrcode.getCameras()
+        if (!mounted) return
+
+
+        const assigned: ({id: string; label: string} | null)[] = [
+          cameras[0] ?? null,
+          cameras[1] ?? null,
+          cameras[2] ?? null,
+        ]
+        setPainelCameras(assigned)
+
+        setPainelScanning(true)
+
+        for (let index = 0; index < PAINEL_COUNT; index++) {
+          const cam = assigned[index]
+          if (!cam) {
+            setPainelErrors(prev => {
+              const next = [...prev]
+              next[index] = cameras.length === 0 ? 'Nenhuma camera detectada' : 'Apenas ' + cameras.length + ' camera(s) encontrada(s)'
+              return next
+            })
+            continue
+          }
+
+          try {
+            const scanner = new Html5Qrcode('painel-reader-' + index)
+            painelScannerInstances.current[index] = scanner
+
+            await scanner.start(
+              { deviceId: { exact: cam.id } },
+              { fps: 18 },
+              async (decodedText) => {
+                if (!mounted) return
+                await validatePainel(index, decodedText)
+              },
+              () => {},
+            )
+          } catch {
+            if (!mounted) return
+            setPainelErrors(prev => {
+              const next = [...prev]
+              next[index] = 'Falha ao iniciar camera ' + (index + 1)
+              return next
+            })
+          }
+        }
+      } catch {
+        if (!mounted) return
+        for (let i = 0; i < PAINEL_COUNT; i++) {
+          setPainelErrors(prev => {
+            const next = [...prev]
+            next[i] = 'Erro ao acessar cameras. Verifique permissoes e HTTPS.'
+            return next
+          })
+        }
+      }
+    }
+
+    void setupCameras()
+
+    return () => {
+      mounted = false
+      for (let i = 0; i < PAINEL_COUNT; i++) {
+        const scanner = painelScannerInstances.current[i]
+        if (scanner) {
+          if (scanner.isScanning) { void scanner.stop() }
+          scanner.clear()
+        }
+      }
+      painelScannerInstances.current = [null, null, null]
+    }
+  }, [view, validatePainel])
 
   const validateNotAbbreviated = (value: string, fieldLabel: string): string | null => {
     const trimmed = value.trim()
@@ -479,6 +665,9 @@ function App() {
     }
   }, [])
 
+
+
+
   const loadValidationLogs = useCallback(async () => {
     setValidationLogsLoading(true)
     setValidationLogsError(null)
@@ -496,120 +685,13 @@ function App() {
     }
   }, [])
 
-  const runValidation = useCallback(async (assetCode: string, photo: File | null) => {
-        setValidationLoading(true)
 
-    try {
-      const formData = new FormData()
-      formData.set('assetCode', assetCode)
-      if (photo) {
-        formData.set('assetPhoto', photo)
-      }
 
-      const response = await fetch(resolveApiUrl('/api/validate'), {
-        method: 'POST',
-        body: formData,
-      })
 
-      if (!response.ok) {
-        const errorData = (await response.json()) as { error?: string }
-        throw new Error(errorData.error ?? 'Falha na validacao')
-      }
 
-      const payload = (await response.json()) as ValidationResponse
-      setValidationResult({
-        validatedAt: new Date().toISOString(),
-        device: {
-          id: payload.device.id,
-          companyName: payload.device.companyName,
-          thirdPartyResponsible: payload.device.thirdPartyResponsible ?? null,
-          teamLeader: payload.device.teamLeader,
-          notebookResponsibleName: payload.device.notebookResponsibleName,
-          department: payload.device.department,
-          matriculaPlanta: payload.device.matriculaPlanta,
-          responsiblePhotoPath: payload.device.responsiblePhotoPath,
-          assetCode: payload.device.assetCode,
 
-          status: payload.device.status,
-          createdAt: payload.device.createdAt,
-          updatedAt: payload.device.updatedAt,
-        },
-        validationPhotoPath: payload.validationPhotoPath,
-      })
-    } catch (error) {
-      lastValidationKeyRef.current = ''
-          } finally {
-      setValidationLoading(false)
-    }
-  }, [])
 
-  useEffect(() => {
-    if (view !== 'camera' || !qrInput || validationLoading) {
-      return
-    }
 
-    const validationKey = qrInput;
-    if (lastValidationKeyRef.current === validationKey) return;
-    lastValidationKeyRef.current = validationKey;
-    void runValidation(qrInput, null);
-  }, [qrInput, runValidation, validationLoading, view])
-
-  useEffect(() => {
-    if (view !== 'painel') {
-      return
-    }
-
-    let cancelled = false
-    let stream: EventSource | null = null
-    let pollId: number | null = null
-
-    const loadLatest = async () => {
-      try {
-        const response = await fetch(resolveApiUrl('/api/validation/latest'), { cache: 'no-store' })
-        if (!response.ok) {
-          return
-        }
-        const payload = (await response.json()) as { latestValidation: LiveValidation | null }
-        if (!cancelled) {
-          setValidationResult(payload.latestValidation)
-        }
-      } catch {
-        // Ignore initial fetch failures, stream retry continues automatically.
-      }
-    }
-
-    void loadLatest()
-    stream = new EventSource(resolveApiUrl('/api/validation/stream'))
-    stream.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as LiveValidation
-        setValidationResult(payload)
-      } catch {
-        // Ignore malformed event payload.
-      }
-    }
-    stream.onerror = () => {
-      if (pollId === null) {
-        pollId = window.setInterval(() => {
-          void loadLatest()
-        }, 1500)
-      }
-    }
-
-    pollId = window.setInterval(() => {
-      void loadLatest()
-    }, 3000)
-
-    return () => {
-      cancelled = true
-      if (stream) {
-        stream.close()
-      }
-      if (pollId !== null) {
-        window.clearInterval(pollId)
-      }
-    }
-  }, [view])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -637,9 +719,6 @@ function App() {
     }
   }, [cadastroMenu, loadDevices, loadValidationLogs, view])
 
-  const validationStatusMeta = validationResult ? getStatusMeta(validationResult.device.status) : null
-  const validationStatusText = validationStatusMeta?.label ?? 'NÃO AUTORIZADO'
-  const validationStatusClass = validationStatusMeta?.bannerClass ?? 'status-banner-blocked'
   const headerTitle =
     view === 'cadastro'
       ? 'Cadastro de notebooks'
@@ -1450,108 +1529,93 @@ function App() {
             </p>
           )}
           {scannerError && <p className="error-msg camera-overlay-msg">{scannerError}</p>}
+          {validationResult && (
+            <div className={'camera-result-overlay ' + getStatusMeta(validationResult.device.status).cardClass}>
+              <h3 className={'status-banner ' + getStatusMeta(validationResult.device.status).bannerClass}>
+                {getStatusMeta(validationResult.device.status).label}
+              </h3>
+              <p className="camera-result-name">{validationResult.device.notebookResponsibleName}</p>
+              <p className="camera-result-asset">Ativo: {validationResult.device.assetCode}</p>
+            </div>
+          )}
         </section>
       )}
 
       {view === 'painel' && (
-        <section className={`card validation-card ${cardBorderClass}`}>
-          <h2>Painel de resultado em tempo real</h2>
+        <section>
+          <div className="painel-grid">
+            {Array.from({ length: PAINEL_COUNT }).map((_, index) => {
+              const result = painelResults[index]
+              const error = painelErrors[index]
+              const camera = painelCameras[index]
+              const statusMeta = result ? getStatusMeta(result.device.status) : null
+              const cardClass = result ? (statusMeta?.cardClass ?? '') : 'status-neutral'
 
-          {!validationResult && (
-            <div className="result-box">
-              <p>Aguardando primeira validacao...</p>
-            </div>
-          )}
+              return (
+                <div key={index} className={'card painel-card ' + cardClass}>
+                  <div id={'painel-reader-' + index} ref={(el) => { painelScannerRefs.current[index] = el }} className="painel-hidden-scanner" />
 
-          {validationResult && (
-            <div className="painel-container">
-              <div className="result-section">
-                <div className="result-box panel-result-box">
-                  <h3 className={`status-banner ${validationStatusClass}`}>{validationStatusText}</h3>
-
-                  <div className="validation-result-layout">
-                    <div>
-                      <img
-                        src={resolveApiUrl(validationResult.device.responsiblePhotoPath)}
-                        alt="Foto do responsavel cadastrado"
-                        className="responsible-photo large-photo"
-                      />
-                    </div>
-                    <div className="result-details">
-                      <p className="status-line" style={{ marginTop: 0 }}>
-                        Ativo: <strong>{validationResult.device.assetCode}</strong>
-                      </p>
-
-                      <p className="detail-label">Empresa:</p>
-                      <p className="detail-value">{validationResult.device.companyName}</p>
-
-                      <p className="detail-label">Responsável:</p>
-                      <p className="detail-value">{validationResult.device.notebookResponsibleName}</p>
-
-                      <p className="detail-label">Líder da Equipe:</p>
-                      <p className="detail-value">{validationResult.device.teamLeader}</p>
-
-                      <p className="detail-label">Departamento:</p>
-                      <p className="detail-value">{validationResult.device.department}</p>
-
-                      <p className="detail-label">Matrícula/Planta:</p>
-                      <p className="detail-value">{validationResult.device.matriculaPlanta}</p>
-
-                      {validationResult.device.thirdPartyResponsible && (
-                        <>
-                          <p className="detail-label">Responsável (terceiro):</p>
-                          <p className="detail-value">{validationResult.device.thirdPartyResponsible}</p>
-                        </>
-                      )}
-                    </div>
+                  <div className="painel-card-header">
+                    <span className="painel-card-title">Painel {index + 1}</span>
+                    {camera && <span className="painel-card-camera-label" title={camera.label}>{camera.label}</span>}
+                    {!camera && <span className="painel-card-camera-label">Sem camera</span>}
                   </div>
 
-                  {validationResult.validationPhotoPath && (
-                    <div className="validation-photo-wrapper">
-                      <p>Foto do ativo na validacao</p>
-                      <img
-                        src={resolveApiUrl(validationResult.validationPhotoPath)}
-                        alt="Foto do ativo capturada no validador"
-                        className="validation-photo"
-                      />
+                  {painelScanning && !result && !error && (
+                    <div className="painel-waiting">
+                      <div className="painel-waiting-dot" />
+                      <p>Aguardando leitura...</p>
+                    </div>
+                  )}
+
+                  {error && !result && (
+                    <div className="result-box">
+                      <p className="error-msg">{error}</p>
+                    </div>
+                  )}
+
+                  {!painelScanning && !result && !error && (
+                    <div className="result-box">
+                      <p>Inicializando cameras...</p>
+                    </div>
+                  )}
+
+                  {result && (
+                    <div className="painel-result">
+                      <h3 className={'status-banner ' + (statusMeta?.bannerClass ?? 'status-banner-blocked')}>
+                        {statusMeta?.label ?? 'NÃO AUTORIZADO'}
+                      </h3>
+                      <div className="painel-result-content">
+                        <img
+                          src={resolveApiUrl(result.device.responsiblePhotoPath)}
+                          alt="Foto"
+                          className="responsible-photo"
+                        />
+                        <div className="painel-result-info">
+                          <p className="painel-result-name">{result.device.notebookResponsibleName}</p>
+                          <p className="subtle-line">{result.device.companyName}</p>
+                          <p className="subtle-line">Ativo: {result.device.assetCode}</p>
+                          <p className="subtle-line">T-number: {result.device.matriculaPlanta}</p>
+                          {result.validationPhotoPath && (
+                            <div className="painel-validation-photo-wrapper">
+                              <img
+                                src={resolveApiUrl(result.validationPhotoPath)}
+                                alt="Foto validacao"
+                                className="painel-validation-photo"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
-              </div>
-
-              <div className="history-section">
-                <h3>Log de validações</h3>
-                <div className="history-list">
-                  {validationHistory.length === 0 ? (
-                    <p className="history-empty">Nenhuma validação registrada ainda</p>
-                  ) : (
-                    validationHistory.map((item) => (
-                      <div
-                        key={`${item.device.id}-${item.validatedAt}`}
-                        className={`history-item ${getStatusMeta(item.device.status).historyClass}`}
-                      >
-                        <img
-                          src={resolveApiUrl(item.device.responsiblePhotoPath)}
-                          alt="Foto do responsável"
-                          className="history-photo"
-                        />
-                        <div className="history-info">
-                          <p className="history-time">{new Date(item.validatedAt).toLocaleTimeString('pt-BR')}</p>
-                          <p className="history-asset">{item.device.assetCode}</p>
-                          <p className="history-responsible">{item.device.notebookResponsibleName}</p>
-                          <p className={`history-status ${getStatusMeta(item.device.status).historyClass}`}>
-                            {getStatusMeta(item.device.status).label}
-                          </p>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
+              )
+            })}
+          </div>
         </section>
       )}
+
       </div>
     </>
   )
