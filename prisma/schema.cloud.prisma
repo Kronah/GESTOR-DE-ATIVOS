@@ -1,0 +1,29 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DeviceStatus {
+  LIBERADO
+  BLOQUEADO
+}
+
+model Device {
+  id                      Int          @id @default(autoincrement())
+  companyName             String
+  thirdPartyResponsible   String?
+  teamLeader              String
+  notebookResponsibleName String
+  contactPhone            String
+  department              String
+  matriculaPlanta         String
+  responsiblePhotoPath    String
+  assetCode               String       @unique
+  status                  DeviceStatus @default(LIBERADO)
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
+}
